@@ -1,2 +1,2 @@
 # sochin
-for code template
+Only for code template
