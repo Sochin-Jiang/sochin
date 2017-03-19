@@ -1,0 +1,41 @@
+#The first section in the configuration file must be called generic, and is used for global options that apply to more than one export.
+#This section must always be present, even if it holds no options.
+[generic]
+    user = root
+	group = root
+#Whether to allow the client to fetch a list of exports from this server. If enabled, the client can run nbd-client -l to get a list of exports on this server.
+	allowlist = true
+#In versions of nbd-server between 2.9.17 and 3.9.1, when this option was set to true, nbd-server would export all exports on a separate port 
+#with the old (pre-2.9.17) handshake protocol. In that case, the 'port' option for individual exports was mandatory.
+	#oldstyle = true
+
+#The port on which to listen for new-style nbd-client connections. If not specified, the IANA-assigned port of 10809 is used.
+	port = 10809
+
+    authfile = /etc/nbd-server/allow
+
+#Every other section defines one export; the names of these sections are not important, except that you should take care to make sure that each section name is unique. 
+#
+[export1]
+#The name of the file (or block device) that will be exported.
+#This must be a fully-qualified path and filename; relative paths are not allowed.
+#If used in conjunction with the temporary, this specifies a template for the temporary file concerned, 
+#and thus can be used to control the directory it is created in. 
+#If the file does not exist, but filesize is set, then the file will be created.
+	exportname = /mnt/images/nbd-disks/disk1.nbd
+# authfile = /etc/nbd-server/allow
+#Disable autodetection of file or block device size, and forcibly specify a size. Sizes must be specified in bytes.
+#If the multifile option is in effect, this option specifies the size of the entire export, not of individual files. 
+#If the file is not present, a single file is created of this size.
+	#filesize =
+
+
+#gnored, kept for compatibility with the obsolete 'oldstyle' global parameter.
+	#listenaddr =
+
+#If specified, then it limits the number of opened connections for this export.
+	#maxconnections =
+
+#[expor]
+#	exportname = /mnt/images/nbd-disks/disk2.nbd
+

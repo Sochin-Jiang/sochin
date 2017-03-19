@@ -1,0 +1,545 @@
+The NBD protocol
+================
+
+The NBD protocol has two phases: the handshake (in which the connection
+is established, an exported NBD device is negotiated between the client
+and the server, and protocol options are negotiated), and the data
+pushing phase (in which the client and server are communicating between
+eachother).
+
+NBD协议有两个阶段：
+1.握手阶段（连接的建立，客户端与服务器对输出NBD设备进行协商；协议选项进行协商）
+2、数据传输
+
+On the client side under Linux, the handshake is implemented in
+userspace, while the data pushing phase is implemented in kernel space.
+
+Linux主机上，第一个阶段在用户态实现，第二个阶段在内核态实现。
+
+
+To get from the handshake to the data pushing phase, the client performs
+
+ioctl(nbd, NBD_SET_SOCK, sock)
+ioctl(nbd, NBD_DO_IT)
+
+从"握手阶段"到"数据传输阶段"，客户端调用两次ioctl命令：
+
+
+with 'nbd' in the above ioctl being a file descriptor for an open
+/dev/nbdX device node, and 'sock' being the socket to the server. The
+second of the two above ioctls does not return until the client
+disconnects.
+
+nbd是一个打开的文件描述符（/dev/nbdx设备节点文件）
+sock是到服务器端的socket连接
+第二个ioctl直到客户端断开连接才返回
+
+Note that there are other ioctls available, that are used by the client
+to communicate the options to the kernel which were negotiated with the
+server during the handshake.
+
+握手阶段，客户端会使用另外的ioctl通过内核与nbd服务器协商nbd选项
+
+There are two message types in the data pushing phase: the request, and
+the response.
+
+（重要 1、）数据传输阶段有两种格式的消息类型：request/response
+
+There are five request types in the data pushing phase: NBD_CMD_READ,
+NBD_CMD_WRITE, NBD_CMD_DISC (disconnect), NBD_CMD_FLUSH, NBD_CMD_TRIM.
+
+（重要 2、）数据传输阶段有五种数据请求request类型： NBD_CMD_READ/NBD_CMD_WRITE/NBD_CMD_DISC/NBD_CMD_FLUSH/NBD_CMD_TRIM
+
+
+The request is sent by the client; the response by the server. 
+
+客户端发送request,服务端发送response
+========================================================request
+
+A request header consists 
+	a 32 bit magic number (magic), 
+	a 32 bit field denoting the request type (see below; 'type'),
+	a 64 bit handle ('handle'), 
+	a 64 bit data offset ('from'), 
+	and a 32 bit length ('len'). 
+
+In case of a write request, the header is immediately followed by 'len' bytes of
+data. In the case of NBD_CMD_FLUSH, the offset and length should
+be zero (meaning "flush entire device"); other values are reserved
+for future use (e.g. for flushing specific areas without a write).
+
+request头部：
+            magic number:			32 bit
+            request type:			32 bit
+            handle:					64 bit
+            data offset(from):	 	64 bit
+            data length(len):		32 bit
+            
+
+
+16位以及以上的命令保留为flags标识位，当前唯一支持的flag是NBD_CMD_FLAG_FUA(第16位)，含义：force unit access
+
+Bits 16 and above of the commands are reserved for flags.  Right
+now, the only flag is NBD_CMD_FLAG_FUA (bit 16), "Force unit access".
+
+
+====================================================reply
+
+The reply contains three fields: 
+	a 32 bit magic number ('magic'), 
+	a 32 bit error code ('error'; 0, unless an error occurred in which case it is
+the errno of the error on the server side), 
+	and the same 64 bit handle that the corresponding request had in its 'handle' field. 
+	
+In case the reply is sent in response to a read request and the error field is 0
+(zero), the reply header is immediately followed by request.len bytes of
+data.
+
+reply头部：
+			magic number:			32 bit
+			error code:				32 bit()
+			handle:					64 bit
+			
+   例如：在读请求的回复中，error设置为0，reply头部的后面紧跟请求长度的数据。
+
+In case of a disconnect request, the server will immediately close the
+connection. Requests are currently handled synchronously; when (not if)
+we change that to asynchronous handling, handling the disconnect request
+will probably be postponed until there are no other outstanding
+requests.
+  
+  再例如：在一个断开连接请求的回复中，服务端会立即关闭连接。对正在请求的
+  数据也会同时丢掉。但若改成异步方式处理，则断开连接的客户端请求会被延迟
+  没有其它数据请求为止。
+
+
+A flush request will not be sent unless NBD_FLAG_SEND_FLUSH is set,
+and indicates the backing file should be fdatasync()'d to disk.
+
+刷数据的请求在设置了NBD_FLAG_SEND_FLUSH flags标志位时才会被发送，
+这表示服务端的后端存储文件会被刷新到磁盘。
+
+The top 16 bits of the request are flags. NBD_CMD_FLAG_FUA implies
+a force unit access, and can currently only be usefully combined
+with NBD_CMD_WRITE. This is implemented using sync_file_range
+if present, else by fdatasync() of that file (note not all files
+in a multifile environment). NBD_CMD_FLAG_FUA will not be set
+unless NBD_FLAG_SEND_FUA is set.
+
+request请求的前16位时flags标志位，NBD_CMD_FLAG_FUA代表了force unit access，
+在nbd写请求（NBD_CMD_WRITE）时配合使用。它的实现思路：
+（1）如果有sync_file_range，则使用sync_file_range实现
+（2）否则使用fdatasync(实际可以是fsync)实现。
+
+There are two versions of the negotiation: the 'old' style (nbd <=
+2.9.16) and the 'new' style (nbd >= 2.9.17, though due to a bug it does
+not work with anything below 2.9.18). 
+
+有两种版本的nbd握手协商：传统方式（nbd 2.9.16之前）和新方式（nbd 2.9.17之后，包括2.9.17）
+
+What follows is a description of both cases 
+(in the below description, the label 'C:' is used for
+messages sent by the client, whereas 'S:' is used for messages sent by
+the server). 
+"quoted text" is for literal character data, 
+'0xdeadbeaf' is used for literal hex numbers (which are always sent in network byte
+order), 
+and (brackets) are used for comments. 
+Anything else is a description of the data that is sent.
+
+下面描述的例子中，'C'代表nbd客户端发送的信息；'S'代表nbd服务端发送的信息；
+引号""中国的内容是字面字符串数据；
+0x开头的数字是16进制的数字，这些数字以网络大端字节序发送；
+括号()中是注释内容；
+其它的内容是对发送数据的描述。
+
+'old' style handshake
+---------------------
+S: "NBDMAGIC" (the INIT_PASSWD in the code)
+S: 0x00420281861253 (cliserv_magic, a magic number)
+S: size of the export in bytes, 64 bit unsigned int
+S: flags, 4 bytes
+S: 124 bytes of zeroes (registered for future use, yes this is
+   excessive).
+
+  传统方式的握手协商方式如下：
+  nbd 服务端发送：
+	"NBDMAGIC"			（初始化密码）
+	0x00420281861253		 (client与server之间magic number)
+	输出nbd设备字符串的长度		 (nbd服务端export名称的字符串长度)
+	flags				 (标志位)
+	124字节的0			 （124字节的0，保留以后使用）
+
+As can be seen, this isn't exactly a negotiation; it's just the server
+sending a bunch of data to the client. If the client is unhappy with
+what he receives, he's supposed to disconnect and not look back.
+
+The fact that the size of the export was specified before the flags were
+sent, made it impossible for the protocol to be changed in a
+backwards-compatible manner to allow for named exports without ugliness.
+As a result, the old style negotiation is now no longer developed, and
+only still supported for backwards compatibility.
+
+nbd服务端输出的设备名称大小是在falgs被发送之前就指定了的。这使得协议无法向后
+兼容对设备的命名的改变。因此，旧形式的握手协商不再被开发。
+
+'new' style handshake
+---------------------
+
+A client who wants to use the new style negotiation should connect on
+the IANA-reserved port for NBD, 10809. 
+The server may listen on other ports as well, 
+but it will use the old style handshake on those. 
+The server will refuse to allow old-style negotiations on the new-style
+port. 
+
+客户端想用使用新形式的握手协商，则应该连接专为nbd设备保留的10809端口号。
+当然nbd服务端也可能监听其他端口，但是这时只能使用就格式的握手协议了。
+服务端会拒绝在新形式协商端口上使用旧形式的协商格式。
+
+For debugging purposes, the server may change the port on which to
+listen for new-style negotiation, but this should not happen for
+production purposes.
+
+S: "NBDMAGIC" (as in the old style handshake)
+S: 0x49484156454F5054 (note different magic number)
+S: 16 bits of zero (bits 1-15 reserved for future use; bit 0 in use to
+   signal fixed newstyle (see below))
+C: 32 bits of zero (reserved for future use)
+
+
+
+This completes the initial phase of negotiation; the client and server
+now both know they understand the first version of the new-style
+handshake, with no options. What follows is a repeating group of
+options. Currently only one option can be set (the name of the export to
+be used), and it is not optional; but future protocol extensions may add
+other options that may or may not be optional. Once extra protocol
+options have been added, the order in which these options are set will
+not be significant.
+
+到此，完成了协商的初始阶段；客户端和服务端彼此了解了新格式握手的版本，至此未
+传输任何选项信息。
+接下来是一组重复的选项信息，现在只有一个必选项可以被设置，这就是nbd设备的名称。
+以后对协议扩展时，可能会加入其它的选项（无论是可选还是必选项）。一旦其它的协议选项
+被加入，那么这些选项的顺序并不重要。
+
+
+The generic format of setting an option is as follows:
+
+C: 0x49484156454F5054 (note same new-style handshake's magic number)
+C: 32 bits denoting the chosen option (NBD_OPT_EXPORT_NAME is the only
+   possible value in this version of the protocol)
+C: unsigned 32 bit length of option data
+C: (any data needed for the chosen option)
+
+通用的设置选项的格式如下：
+
+nbd客户端：
+	0x49484156454F5054（发送新格式的握手magic数字）
+	32位标记所传输选项（当前仅支持NBD_OPT_EXPORT_NAME）
+	选项的长度用32位unsigned类型表示
+	任何满足长度的选项信息（比如nbd设备的名字字符串）
+
+The presence of the option length in every option allows the server
+to skip any options presented by the client that it does not
+understand.
+
+其中第三个关于选项（数据）长度的信息，让服务端忽略任何多余此长度的数据。
+
+The data needed for the NBD_OPT_EXPORT_NAME option is:
+
+
+
+C: name of the export (character string of length as specified,
+   not terminated by any NUL bytes or similar)
+
+NBD_OPT_EXPORT_NAME选项需要传输的数据是：
+	nbd export设备的字符串信息，以NUL字节结尾
+
+Once all options are set, the server replies with information about the
+used export:
+
+S: size of the export in bytes, 64 bit unsigned int
+S: flags (16 bits unsigned int)
+S: 124 bytes of zeroes (forgot to remove that, oops)
+
+当客户端发送了设置选项之后，服务端回复关于nbd exports设备的信息，如下：
+
+nbd服务端：
+	发送64位unsigned int类型的export设备的长度
+	16位flags标记位
+	124字节的0
+
+
+The reason that the flags field is 16 bits large and not 32 as in the
+old style of the protocol is that there are now 16 bits of per-export
+flags, and 16 bits of per-server flags. Concatenated together, this
+results in 32 bits, which allows for using a common set of macros for
+both; indeed, the code masks away the upper or lower bits of a 32 bit
+"flags" field when performing the new-style handshake. If we ever run
+out of flags, the server will set the most significant flag bit,
+signalling that an extra flag field will follow, to which the client
+will have to reply with a flag field of its own before the extra flags
+are sent. This is not yet implemented.
+
+flags域的长度之所以是16位而非传统协议形式的32位的原因是
+
+
+
+
+Fixed 'new' style handshake
+---------------------------
+
+Unfortunately, due to a mistake on my end, the server would immediately
+close the connection when it saw an option it did not understand, rather
+than signalling this fact to the client, which would've allowed it to
+retry; and replies from the server were not structured either, which
+meant that if the server were to send something the client did not
+understand, it would have to abort negotiation as well.
+
+To fix these two issues, the handshake has been extended once more:
+
+- The server will set bit 0 of its first set of reserved flags, to
+  signal that it supports this version of the protocol.
+- The client should reply with bit 0 set in its reserved field too,
+  though its side of the protocol does not change incompatibly.
+- The client may now send other options to the server as appropriate, in
+  the generic format for sending an option as described above.
+- The server will reply to any option apart from NBD_OPT_EXPORT_NAME
+  with reply packets in the following format:
+
+S: 64 bits, 0x3e889045565a9 (magic number for replies)
+S: 32 bits, the option as sent by the client to which this is a reply
+   packet.
+S: 32 bits, denoting reply type (e.g., NBD_REP_ACK to denote successful
+   completion, or NBD_REP_ERR_UNSUP to denote use of an option not known
+   by this server
+S: 32 bits, length of the reply. This may be zero for some replies, in
+   which case the next field is not sent
+S: any data as required by the reply (e.g., an export name in the case
+   of NBD_REP_SERVER
+
+As there is no unique number for client requests, clients who want to
+differentiate between answers to two instances of the same option during
+any negotiation must make sure they've seen the answer to an outstanding
+request before sending the next one of the same type.
+
+
+
+
+
+Values
+------
+
+This section describes the meaning of constants (other than magic
+numbers) in the protocol handshake.
+本章节握手协议中常量的含义（除去magic数字）。
+
+Flag bits
+- - - - -
+
+flag标记位含义：
+
+每一个export设备16位标记位（在握手协商阶段，被发送；传统格式握手协议中，
+global标记位后立即发送）
+* Per-export (16 bits, sent after option haggling, or immediately after
+  the global flag field in oldstyle negotiation):
+
+位0： NBD_FLAG_HAS_FLAGS位，永远为1。表示有flags标记位
+  bit 0 - NBD_FLAG_HAS_FLAGS
+  should always be 1
+
+位1： NBD_FLAG_READ_ONLY位，当服务端export的设备只读时被设置。
+  bit 1 - NBD_FLAG_READ_ONLY
+  should be set to 1 if the export is read-only
+
+位2： NBD_FLAG_SEND_FLUSH位，当服务端支持 NBD_CMD_FLUSH 命令时设置。
+  bit 2 - NBD_FLAG_SEND_FLUSH
+  should be set to 1 if the server supports NBD_CMD_FLUSH commands
+
+位3： NBD_FLAG_SEND_FUA位， 当服务端支持NBD_CMD_FLAG_FUA 时被设置。
+  bit 3 - NBD_FLAG_SEND_FUA
+  should be set to 1 if the server supports the NBD_CMD_FLAG_FUA flag
+
+位4： NBD_FLAG_ROTATIONAL位，设置此位让客户端
+  bit 4 - NBD_FLAG_ROTATIONAL
+  should be set to 1 to let the client schedule I/O accesses as for a
+  rotational medium
+
+位5： NBD_FLAG_SEND_TRIM位， 服务端支持NBD_CMD_TRIM命令时设置。
+  bit 5 - NBD_FLAG_SEND_TRIM
+  should be set to 1 if the server supports NBD_CMD_TRIM commands
+
+
+
+全局标志位（16位，在连接初始化后设置）
+* Global flag bits (16 bits, after initial connection):
+
+位0： NBD_FLAG_FIXED_NEWSTYLE位， 服务端支持固定新格式协议时设置。
+  bit 0 - NBD_FLAG_FIXED_NEWSTYLE
+  should be set by servers that support the fixed newstyle protocol
+
+位1： NBD_FLAG_NO_ZEROES位， 客户端设置了此位，则服务端不发送握手协议的124位尾0。
+  bit 1 - NBD_FLAG_NO_ZEROES
+  If set, and if the client sets NBD_FLAG_C_NO_ZEROES, then the 124
+  bytes of zero at the end of the negotiation will not be sent by the
+  server.
+
+
+客户端为设置（当连接初始化完成并接收到服务端发送的标志位后）
+* Client (after initial connection and after receiving flags from
+  server):
+
+位0： NBD_FLAG_C_FIXED_NEWSTYLE位，在客户端支持固定新格式协议时设置。
+  bit 0 - NBD_FLAG_C_FIXED_NEWSTYLE
+  Should be set by clients that support the fixed newstyle protocol.
+  Servers may choose to honour fixed newstyle from clients that didn't
+  set this bit, but relying on this isn't recommended.
+
+位1： NBD_FLAG_C_NO_ZEROES位， 服务端设置该位时客户端必须设置此位，并且一旦设置了该位，124位的尾0就不会被发送。
+  bit 1 - NBD_FLAG_C_NO_ZEROES
+  MUST only be set if the server also sets NBD_FLAG_NO_ZEROES. If set,
+  the server MUST NOT send the 124 bytes of zeroes at the end of the
+  negotiation.
+
+
+选项类型
+Option types
+- - - - - - -
+
+* NBD_OPT_EXPORT_NAME (1)
+  Choose the export which the client would like to use, and end option
+  haggling. Data: name of the export, free-form UTF8 text (subject to
+  limitations by server implementation). If the chosen export does not
+  exist, the server closes the connection.
+  A special, "empty", name (i.e., the length field is zero and no name
+  is specified), is reserved for a "default" export, to be used in cases
+  where explicitly specifying an export name makes no sense.
+
+* NBD_OPT_ABORT (2)
+  Abort negotiation and close the connection. Optional.
+
+* NBD_OPT_LIST (3)
+  Returns a number of NBD_REP_SERVER replies, one for each export,
+  followed by an NBD_REP_ACK.
+
+
+回复类型
+Reply types
+- - - - - -
+
+* NBD_REP_ACK (1)
+  Will be sent by the server when it accepts the option, or when sending
+  data related to the option (in the case of NBD_OPT_LIST) has finished.
+  No data.
+
+* NBD_REP_SERVER (2)
+  A description of an export. Data:
+  - 32 bits, length of name
+  - Name of the export, as expected by NBD_OPT_EXPORT_NAME
+  - If length of name < (length of reply as sent in the reply packet
+    header - 4), then the rest of the data contains some undefined
+    implementation-specific details about the export. This is not
+    currently implemented, but future versions of nbd-server may send
+    along some details about the export. If the client did not
+    explicitly request otherwise, these details are defined to be UTF-8
+    encoded data suitable for direct display to a human being.
+
+There are a number of error reply types, all of which are denoted by
+having bit 31 set. All error replies may have some data set, in which
+case that data is an error message suitable for display to the user.
+
+* NBD_REP_ERR_UNSUP (2^31 + 1)
+  The option sent by the client is unknown by this server
+  implementation (e.g., because the server is too old, or from another
+  source).
+
+* NBD_REP_ERR_POLICY (2^31 + 2)
+  The option sent by the client is known by this server and
+  syntactically valid, but server-side policy forbids the server to
+  allow the option (e.g., the client sent NBD_OPT_LIST but server
+  configuration has that disabled)
+
+* NBD_REP_ERR_INVALID (2^31 + 3)
+  The option sent by the client is know by this server, but was
+  determined by the server to be syntactically invalid. For instance,
+  the client sent an NBD_OPT_LIST with nonzero data length.
+
+* NBD_REP_ERR_PLATFORM (2^31 + 4)
+  The option sent by the client is not supported on the platform on
+  which the server is running. Not currently used.
+
+
+请求类型
+Request types
+- - - - - - -
+
+The following request types exist:
+
+读请求
+* NBD_CMD_READ (0)
+  A read request. Length and offset define the data to be read. The
+  server MUST reply with a reply header, followed immediately by len
+  bytes of data, read offset bytes into the file, unless an error
+  condition has occurred.
+
+
+写请求
+* NBD_CMD_WRITE (1)
+  A write request. Length and offset define the location and amount of
+  data to be written. The server should write the data to disk, and then
+  send the reply header. However, the server does not need to ensure
+  that all data has hit the disk, unless the NBD_CMD_FLAG_FUA flag is
+  set (bit 16).
+
+
+断开连接
+* NBD_CMD_DISC (2)
+  A disconnect request. The server MUST handle all outstanding
+  requests, and then close the connection.
+  A client MUST NOT send anything to the server after sending an
+  NBD_CMD_DISC command.
+
+数据刷盘
+* NBD_CMD_FLUSH (3)
+  A flush request; a write barrier. The server MUST NOT send the reply
+  header to this request before all outstanding write requests that were
+  sent before this command have hit the disk (using fsync() or similar).
+  In this command, "len" and "offset" are reserved, and should be set to
+  all-zero.
+
+丢弃某段数据（服务端不保证）
+* NBD_CMD_TRIM (4)
+  A hint to the server that the data defined by len and offset is no
+  longer needed. A server MAY discard len bytes starting at offset, but
+  is not required to.
+  After issuing this command, a client MUST NOT make any assumptions
+  about the contents of the export affected by this command, until
+  overwriting it again with NBD_CMD_WRITE.
+
+
+* NBD_CMD_CACHE (5)
+  This command is defined by xnbd.
+
+About this file
+---------------
+
+This file tries to document the NBD protocol as it is currently
+implemented in the Linux kernel and in the reference implementation. The
+purpose of this file is to allow people to understand the protocol
+without having to read the code. However, the description above does not
+come with any form of warranty; while every effort has been taken to
+avoid them, mistakes are possible.
+
+In contrast to the other files in this repository, this file is not
+licensed under the GPLv2. To the extent possible by applicable law, I
+hereby waive all copyright and related or neighboring rights to this
+file and release it into the public domain.
+
+The purpose of releasing this into the public domain is to allow
+competing implementations of the NBD protocol without those
+implementations being considered derivative implementations; but please
+note that changing this document, while allowed by its public domain
+status, does not make an incompatible implementation suddenly speak the
+NBD protocol.
