@@ -450,6 +450,8 @@ There are a number of error reply types, all of which are denoted by
 having bit 31 set. All error replies may have some data set, in which
 case that data is an error message suitable for display to the user.
 
+
+
 * NBD_REP_ERR_UNSUP (2^31 + 1)
   The option sent by the client is unknown by this server
   implementation (e.g., because the server is too old, or from another
@@ -521,6 +523,23 @@ The following request types exist:
 
 * NBD_CMD_CACHE (5)
   This command is defined by xnbd.
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
 
 About this file
 ---------------
